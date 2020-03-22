@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+
+from subprocess import run
+from os import environ, SEEK_END, SEEK_SET
+from configparser import ConfigParser
+
+
+# Set service blacklist (to block systemd from polluting mount count)
+service_blacklist = [
+    'systemd_user',
+    'sudo',
+]
+
+# Set PAM related variables from environment
+pam_user = environ.get('PAM_USER')
+pam_type = environ.get('PAM_TYPE')
+pam_service = environ.get('PAM_SERVICE')
+
+if not all([pam_user, pam_type, pam_service]):
+    # Environment parameters missing (exit code: 2)
+    print('Missing environment parameters')
+    exit(2)
+
+print('Current user: {}'.format(pam_user))
+print('Current service: {}'.format(pam_service))
+print('Current action: {}'.format(pam_type))
+
+# Read config for current user
+ecfg = ConfigParser()
+r_global = ecfg.read('/home/.ecryptfs/{}/config'.format(pam_user))
+
+if pam_service in service_blacklist:
+    print('Skipping {} session'.format(pam_service))
+    exit(0)
+
+# Set ecryptfs related variables
+mounts = {}
+
+ecryptfs_user_home = ecfg['DEFAULT'].get(
+    'home_dir',
+    '/home/{}'.format(pam_user)
+)
+
+r_local = ecfg.read('{}/.ecryptfs/config'.format(ecryptfs_user_home))
+
+# Exit if no configs found for user
+if not any([r_global, r_local]):
+    print('No config found for user {}'.format(pam_user))
+    exit(0)
+
+for alias in ecfg.sections():
+    if not int(ecfg[alias].get('enabled', '0')):
+        print('EcryptFS disabled for alias: {}'.format(alias))
+        continue
+
+    mounts[alias] = {
+        'wrapped_passphrase': ecfg[alias].get(
+            'wrapped_passphrase',
+            '{0}/.ecryptfs/{1}.wrapped'.format(ecryptfs_user_home, alias)
+        ),
+    }
+
+    if ecfg[alias].get('type', 'alias') != 'custom':
+        with open('{0}/.ecryptfs/{1}.conf'.format(ecryptfs_user_home, alias)) as alias_conf:
+            mount_source, mount_point, _ = alias_conf.readline().split(' ')
+        with open('{0}/.ecryptfs/{1}.sig'.format(ecryptfs_user_home, alias)) as alias_sig:
+            key_sig = alias_sig.readline()
+            fnek_sig = alias_sig.readline()
+    else:
+        mount_source = ecfg[alias].get(
+            'mount_source',
+            '{0}/.{1}'.format(ecryptfs_user_home, alias)
+        )
+        mount_point = ecfg[alias].get(
+            'mount_point',
+            '{0}/{1}'.format(ecryptfs_user_home, alias)
+        )
+        key_sig = ecfg[alias].get(
+            'key_sig', ''
+        )
+        fnek_sig = ecfg[alias].get(
+            'fnek_sig', ''
+        )
+
+    if not all([mount_source, mount_point, key_sig]):
+        # Mount source or point not set (exit code: 3)
+        exit(3)
+
+    mounts[alias].update({
+        'mount_source': mount_source,
+        'mount_point': mount_point,
+        'key_sig': key_sig,
+        'fnek_sig': fnek_sig,
+    })
+
+    print('EcryptFS config loaded: {}'.format(alias))
+    print(mounts[alias])
+
+
+# Load login count for user
+login_counter_file = open('/tmp/.{}_login_count.ecryptfs-auto'.format(pam_user), 'a+')
+
+if pam_type == 'auth':
+    print('Log auth event')
+    login_counter_file.write('{}\n'.format(pam_service))
+    for alias, params in mounts.items():
+        if run(['mountpoint', '-q', params['mount_point']]).returncode != 0:
+            print('Mounting {0} on {1} for user {2}'.format(alias, params['mount_point'], pam_user))
+            run([
+                'ecryptfs-insert-wrapped-passphrase-into-keyring',
+                params['wrapped_passphrase'],
+            ])
+            run(['keyctl', 'link', '@u', '@s'])
+            run([
+                'mount',
+                '-i',
+                '-t',
+                'ecryptfs',
+                params['mount_source'],
+                params['mount_point'],
+                '-o',
+                'ecryptfs_sig={0},'
+                'ecryptfs_fnek_sig={1},'
+                'ecryptfs_cipher=aes,'
+                'ecryptfs_key_bytes=32,'
+                'user,exec'
+                .format(params['key_sig'], params['fnek_sig']),
+            ])
+            run(['keyctl', 'unlink', '@u', '@s'])
+            run(['keyctl', 'clear', '@u'])
+elif pam_type == 'close_session':
+    print('Log session event')
+    login_counter_file.seek(0, SEEK_END)
+    pos = login_counter_file.tell() - 1
+    while pos > 0 and login_counter_file.read(1) != '\n':
+        pos -= 1
+        login_counter_file.seek(pos, SEEK_SET)
+
+    if pos > 0:
+        login_counter_file.seek(pos, SEEK_SET)
+        login_counter_file.truncate()
+    else:
+        print('No sessions left for user: {}'.format(pam_user))
+        for alias, params in mounts.items():
+            if run(['mountpoint', '-q', params['mount_point']]).returncode == 0:
+                print('Unmounting {0} for user {1}'.format(alias, pam_user))
+                run([
+                    'sudo',
+                    '-s',
+                    '-u',
+                    pam_user,
+                    'umount.ecryptfs_private',
+                    '-f',
+                    alias,
+                ])
+            # run(['sudo', '-s', '-u', pam_user, 'keyctl', 'clear', '@u'])
+
