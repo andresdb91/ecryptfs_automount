@@ -81,6 +81,9 @@ for alias in ecfg.sections():
         fnek_sig = ecfg[alias].get(
             'fnek_sig', ''
         )
+        bind = ecfg[alias].get(
+            'bind', ''
+        )
 
     if not all([mount_source, mount_point, key_sig]):
         # Mount source or point not set (exit code: 3)
@@ -98,11 +101,10 @@ for alias in ecfg.sections():
 
 
 # Load login count for user
-login_counter_file = open('/tmp/.{}_login_count.ecryptfs-auto'.format(pam_user), 'a+')
+if pam_type in ['open_session', 'close_session']:
+    login_counter_file = open('/tmp/.{}_login_count.ecryptfs-auto'.format(pam_user), 'a+')
 
 if pam_type == 'auth':
-    print('Log auth event')
-    login_counter_file.write('{}\n'.format(pam_service))
     for alias, params in mounts.items():
         if run(['mountpoint', '-q', params['mount_point']]).returncode != 0:
             print('Mounting {0} on {1} for user {2}'.format(alias, params['mount_point'], pam_user))
@@ -128,8 +130,16 @@ if pam_type == 'auth':
             ])
             run(['keyctl', 'unlink', '@u', '@s'])
             run(['keyctl', 'clear', '@u'])
+            if params['bind']:
+                run([
+                    'mount',
+                    '--bind',
+                    params['mount_point'],
+                    params['bind'],
+                ])
+elif pam_type == 'open_session':
+    login_counter_file.write('{}\n'.format(pam_service))
 elif pam_type == 'close_session':
-    print('Log session event')
     login_counter_file.seek(0, SEEK_END)
     pos = login_counter_file.tell() - 1
     while pos > 0 and login_counter_file.read(1) != '\n':
@@ -154,4 +164,6 @@ elif pam_type == 'close_session':
                     alias,
                 ])
             # run(['sudo', '-s', '-u', pam_user, 'keyctl', 'clear', '@u'])
+
+login_counter_file.close()
 
