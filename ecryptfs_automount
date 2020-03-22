@@ -5,6 +5,40 @@ from os import environ, SEEK_END, SEEK_SET
 from configparser import ConfigParser
 
 
+def mount(name, params):
+    if run(['mountpoint', '-q', params['mount_point']]).returncode != 0:
+        print('Mounting {0} on {1} for user {2}'.format(name, params['mount_point'], pam_user))
+        run([
+            'ecryptfs-insert-wrapped-passphrase-into-keyring',
+            params['wrapped_passphrase'],
+        ])
+        run(['keyctl', 'link', '@u', '@s'])
+        run([
+            'mount',
+            '-i',
+            '-t',
+            'ecryptfs',
+            params['mount_source'],
+            params['mount_point'],
+            '-o',
+            'ecryptfs_sig={0},'
+            'ecryptfs_fnek_sig={1},'
+            'ecryptfs_cipher=aes,'
+            'ecryptfs_key_bytes=32,'
+            'user,exec'
+            .format(params['key_sig'], params['fnek_sig']),
+        ])
+        run(['keyctl', 'unlink', '@u', '@s'])
+        run(['keyctl', 'clear', '@u'])
+        if params['bind']:
+            run([
+                'mount',
+                '--bind',
+                params['mount_point'],
+                params['bind'],
+            ])
+
+
 # Set service blacklist (to block systemd from polluting mount count)
 service_blacklist = [
     'systemd_user',
@@ -41,6 +75,22 @@ ecryptfs_user_home = ecfg['DEFAULT'].get(
     '/home/{}'.format(pam_user)
 )
 
+encrypted_home = ecfg['DEFAULT'].get('home_crypt', '')
+if encrypted_home:
+    encrypted_home_params = {
+        'mount_source': ecfg[encrypted_home].get('mount_source'),
+        'mount_point': ecfg[encrypted_home].get('mount_point'),
+        'key_sig': ecfg[encrypted_home].get('key_sig'),
+        'fnek_sig': ecfg[encrypted_home].get('fnek_sig', ''),
+    }
+
+    if any(x is None for x in mounts[encrypted_home].values()):
+        print('Incomplete encrypted home dir config')
+        # Incomplete config for encrypted home dir (exit code: 4)
+        exit(4)
+
+    mount(encrypted_home, encrypted_home_params)
+
 r_local = ecfg.read('{}/.ecryptfs/config'.format(ecryptfs_user_home))
 
 # Exit if no configs found for user
@@ -49,6 +99,10 @@ if not any([r_global, r_local]):
     exit(0)
 
 for alias in ecfg.sections():
+    if alias == encrypted_home:
+        print('Skipping encrypted home directory')
+        continue
+
     if not int(ecfg[alias].get('enabled', '0')):
         print('EcryptFS disabled for alias: {}'.format(alias))
         continue
@@ -66,6 +120,7 @@ for alias in ecfg.sections():
         with open('{0}/.ecryptfs/{1}.sig'.format(ecryptfs_user_home, alias)) as alias_sig:
             key_sig = alias_sig.readline()
             fnek_sig = alias_sig.readline()
+        bind = ''
     else:
         mount_source = ecfg[alias].get(
             'mount_source',
@@ -94,49 +149,19 @@ for alias in ecfg.sections():
         'mount_point': mount_point,
         'key_sig': key_sig,
         'fnek_sig': fnek_sig,
+        'bind': bind
     })
 
     print('EcryptFS config loaded: {}'.format(alias))
     print(mounts[alias])
-
 
 # Load login count for user
 if pam_type in ['open_session', 'close_session']:
     login_counter_file = open('/tmp/.{}_login_count.ecryptfs-auto'.format(pam_user), 'a+')
 
 if pam_type == 'auth':
-    for alias, params in mounts.items():
-        if run(['mountpoint', '-q', params['mount_point']]).returncode != 0:
-            print('Mounting {0} on {1} for user {2}'.format(alias, params['mount_point'], pam_user))
-            run([
-                'ecryptfs-insert-wrapped-passphrase-into-keyring',
-                params['wrapped_passphrase'],
-            ])
-            run(['keyctl', 'link', '@u', '@s'])
-            run([
-                'mount',
-                '-i',
-                '-t',
-                'ecryptfs',
-                params['mount_source'],
-                params['mount_point'],
-                '-o',
-                'ecryptfs_sig={0},'
-                'ecryptfs_fnek_sig={1},'
-                'ecryptfs_cipher=aes,'
-                'ecryptfs_key_bytes=32,'
-                'user,exec'
-                .format(params['key_sig'], params['fnek_sig']),
-            ])
-            run(['keyctl', 'unlink', '@u', '@s'])
-            run(['keyctl', 'clear', '@u'])
-            if params['bind']:
-                run([
-                    'mount',
-                    '--bind',
-                    params['mount_point'],
-                    params['bind'],
-                ])
+    for a, p in mounts.items():
+        mount(a, p)
 elif pam_type == 'open_session':
     login_counter_file.write('{}\n'.format(pam_service))
 elif pam_type == 'close_session':
@@ -151,9 +176,9 @@ elif pam_type == 'close_session':
         login_counter_file.truncate()
     else:
         print('No sessions left for user: {}'.format(pam_user))
-        for alias, params in mounts.items():
-            if run(['mountpoint', '-q', params['mount_point']]).returncode == 0:
-                print('Unmounting {0} for user {1}'.format(alias, pam_user))
+        for a, p in mounts.items():
+            if run(['mountpoint', '-q', p['mount_point']]).returncode == 0:
+                print('Unmounting {0} for user {1}'.format(a, pam_user))
                 run([
                     'sudo',
                     '-s',
@@ -161,7 +186,7 @@ elif pam_type == 'close_session':
                     pam_user,
                     'umount.ecryptfs_private',
                     '-f',
-                    alias,
+                    a,
                 ])
             # run(['sudo', '-s', '-u', pam_user, 'keyctl', 'clear', '@u'])
 
