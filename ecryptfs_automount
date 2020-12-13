@@ -38,10 +38,9 @@ def mount(name, params):
                 params['bind'],
             ])
 
-
 # Set service blacklist (to block systemd from polluting mount count)
 service_blacklist = [
-    'systemd_user',
+    'systemd-user',
     'sudo',
 ]
 
@@ -75,7 +74,7 @@ ecryptfs_user_home = ecfg['DEFAULT'].get(
     '/home/{}'.format(pam_user)
 )
 
-encrypted_home = ecfg['DEFAULT'].get('home_crypt', '')
+encrypted_home = ecfg['DEFAULT'].get('home_crypt_alias', '')
 if encrypted_home:
     encrypted_home_params = {
         'mount_source': ecfg[encrypted_home].get('mount_source'),
@@ -155,6 +154,8 @@ for alias in ecfg.sections():
     print('EcryptFS config loaded: {}'.format(alias))
     print(mounts[alias])
 
+login_counter_file = None
+
 # Load login count for user
 if pam_type in ['open_session', 'close_session']:
     login_counter_file = open('/tmp/.{}_login_count.ecryptfs-auto'.format(pam_user), 'a+')
@@ -175,20 +176,28 @@ elif pam_type == 'close_session':
         login_counter_file.seek(pos, SEEK_SET)
         login_counter_file.truncate()
     else:
+        login_counter_file.seek(0, SEEK_SET)
+        login_counter_file.truncate()
         print('No sessions left for user: {}'.format(pam_user))
         for a, p in mounts.items():
             if run(['mountpoint', '-q', p['mount_point']]).returncode == 0:
                 print('Unmounting {0} for user {1}'.format(a, pam_user))
                 run([
-                    'sudo',
-                    '-s',
-                    '-u',
-                    pam_user,
-                    'umount.ecryptfs_private',
-                    '-f',
-                    a,
+                    'umount',
+                    '--lazy',
+                    p['mount_point'],
                 ])
+                #run([
+                #    'sudo',
+                #    '-s',
+                #    '-u',
+                #    pam_user,
+                #    'umount.ecryptfs_private',
+                #    '-f',
+                #    a,
+                #])
             # run(['sudo', '-s', '-u', pam_user, 'keyctl', 'clear', '@u'])
 
-login_counter_file.close()
+if login_counter_file:
+    login_counter_file.close()
 
