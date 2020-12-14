@@ -1,0 +1,27 @@
+[DEFAULT]
+enabled = 1
+# "pointer" to encrypted home alias, not tested but should work
+# home_crypt_alias = home
+# home_dir = /home/andres
+
+# Sample alias folder config
+# [priv]
+# enabled = 0
+# wrapped_passphrase = /home/andres/.ecryptfs/priv.wrapped
+# type can be alias or custom
+# - alias work with ecryptfs.mount_private
+# - custom work with manual mount command
+# type = alias
+# mount_point = /home/andres/.upriv
+# mount_source = /home/andres/.epriv  # Custom type only, optional
+
+# Sample home custom config
+[home]
+# enabled = 1
+type = custom
+wrapped_passphrase = /home/.ecryptfs/alice/home.wrapped
+mount_source = /home/.ecryptfs/alice/.home
+mount_point = /home/alice
+key_sig = 839d8fa8930e0cf3
+fnek_sig = 839d8fa8930e0cf3
+
